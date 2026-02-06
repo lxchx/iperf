@@ -490,6 +490,22 @@ Nrecv_no_select(int fd, char *buf, size_t count, int prot, int sock_opt)
     register ssize_t r;
     register size_t nleft = count;
 
+    /*
+     * Datagram sockets (UDP) are message-oriented.  A short read means the
+     * datagram itself was shorter than expected, and it is not correct to
+     * try to "top up" the buffer by reading additional datagrams.
+     */
+    if (prot == SOCK_DGRAM) {
+        r = recv(fd, buf, count, sock_opt);
+        if (r < 0) {
+            /* XXX EWOULDBLOCK can't happen without non-blocking sockets */
+            if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
+                return 0;
+            return NET_HARDERROR;
+        }
+        return r;
+    }
+
     while (nleft > 0) {
         if (sock_opt)
             r = recv(fd, buf, nleft, sock_opt);

@@ -84,6 +84,7 @@
 #include "iperf_util.h"
 #include "iperf_locale.h"
 #include "version.h"
+#include "local_build.h"
 #if defined(HAVE_SSL)
 #include <openssl/bio.h>
 #include <openssl/err.h>
@@ -1279,8 +1280,8 @@ iperf_parse_arguments(struct iperf_test *test, int argc, char **argv)
                 test->json_stream_full_output = 1;
                 break;
             case 'v':
-                printf("%s (cJSON %s)\n%s\n%s\n", version, cJSON_Version(), get_system_info(),
-		       get_optional_features());
+                printf("%s (%s) (cJSON %s)\n%s\n%s\n", version, IPERF3_LOCAL_VARIANT, cJSON_Version(), get_system_info(),
+			       get_optional_features());
                 exit(0);
             case 's':
                 if (test->role == 'c') {

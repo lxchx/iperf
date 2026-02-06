@@ -65,6 +65,50 @@
 #endif /* TCP_CA_NAME_MAX */
 #endif /* HAVE_TCP_CONGESTION */
 
+/*
+ * In UDP mode the client sends a UDP_CONNECT_MSG and expects a single
+ * UDP_CONNECT_REPLY back from the server to "accept" the stream.  Either
+ * direction can drop a packet, so a newer client may retransmit the connect
+ * message if it doesn't see a reply.
+ *
+ * During CREATE_STREAMS we don't have per-stream worker threads running yet.
+ * Retransmitted connect messages arrive on the already-connected per-stream
+ * socket and would otherwise just queue up (and potentially confuse later
+ * statistics).  Drain them here and re-send the reply so stream setup can
+ * make progress.
+ */
+static void
+iperf_server_handle_udp_connect_msgs(struct iperf_stream *sp)
+{
+    unsigned int buf;
+    int sz;
+    fd_set drain_set;
+    struct timeval drain_tv;
+    int rc;
+
+    for (;;) {
+        sz = recv(sp->socket, &buf, sizeof(buf), 0);
+        if (sz < 0) {
+            if (errno == EINTR)
+                continue;
+            break;
+        }
+
+        if (sz == sizeof(buf) && buf == UDP_CONNECT_MSG) {
+            unsigned int reply = UDP_CONNECT_REPLY;
+            (void) write(sp->socket, &reply, sizeof(reply));
+        }
+
+        FD_ZERO(&drain_set);
+        FD_SET(sp->socket, &drain_set);
+        drain_tv.tv_sec = 0;
+        drain_tv.tv_usec = 0;
+        rc = select(sp->socket + 1, &drain_set, NULL, NULL, &drain_tv);
+        if (rc <= 0)
+            break;
+    }
+}
+
 void *
 iperf_server_worker_run(void *s) {
     struct iperf_stream *sp = (struct iperf_stream *) s;
@@ -548,6 +592,8 @@ iperf_run_server(struct iperf_test *test)
     int64_t t_usecs;
     int64_t timeout_us;
     int64_t rcv_timeout_us;
+    int max_fd;
+    struct iperf_stream *udp_stream_iter;
 
     if (test->logfile) {
         if (iperf_open_logfile(test) < 0)
@@ -603,6 +649,20 @@ iperf_run_server(struct iperf_test *test)
 
         memcpy(&read_set, &test->read_set, sizeof(fd_set));
         memcpy(&write_set, &test->write_set, sizeof(fd_set));
+        max_fd = test->max_fd;
+
+        /*
+         * In UDP mode, allow already-accepted stream sockets to wake up the
+         * select() loop during CREATE_STREAMS so we can handle retransmitted
+         * UDP_CONNECT_MSG packets.
+         */
+        if (test->state == CREATE_STREAMS && test->protocol->id == Pudp) {
+            SLIST_FOREACH(udp_stream_iter, &test->streams, streams) {
+                FD_SET(udp_stream_iter->socket, &read_set);
+                if (udp_stream_iter->socket > max_fd)
+                    max_fd = udp_stream_iter->socket;
+            }
+        }
 
 	iperf_time_now(&now);
 	timeout = tmr_timeout(&now);
@@ -614,25 +674,25 @@ iperf_run_server(struct iperf_test *test)
                 used_timeout.tv_usec = 0;
                 timeout = &used_timeout;
             }
-        } else if (test->mode != SENDER) {     // In non-reverse active mode server ensures data is received
-            timeout_us = -1;
-            if (timeout != NULL) {
-                used_timeout.tv_sec = timeout->tv_sec;
-                used_timeout.tv_usec = timeout->tv_usec;
-                timeout_us = (timeout->tv_sec * SEC_TO_US) + timeout->tv_usec;
-            }
-            /* Cap the maximum select timeout at 1 second */
-            if (timeout_us > SEC_TO_US) {
-                timeout_us = SEC_TO_US;
-            }
-            if (timeout_us < 0 || timeout_us > rcv_timeout_us) {
-                used_timeout.tv_sec = test->settings->rcv_timeout.secs;
-                used_timeout.tv_usec = test->settings->rcv_timeout.usecs;
-            }
-            timeout = &used_timeout;
-        }
+	        } else if (test->mode != SENDER) {     // In non-reverse active mode server ensures data is received
+	            timeout_us = -1;
+	            if (timeout != NULL) {
+	                used_timeout.tv_sec = timeout->tv_sec;
+	                used_timeout.tv_usec = timeout->tv_usec;
+	                timeout_us = (timeout->tv_sec * SEC_TO_US) + timeout->tv_usec;
+	            }
+	            /* Cap the maximum select timeout at 1 second */
+	            if (timeout_us > SEC_TO_US) {
+	                timeout_us = SEC_TO_US;
+	            }
+	            if (timeout_us < 0 || timeout_us > rcv_timeout_us) {
+	                used_timeout.tv_sec = test->settings->rcv_timeout.secs;
+	                used_timeout.tv_usec = test->settings->rcv_timeout.usecs;
+	            }
+	            timeout = &used_timeout;
+	        }
 
-        result = select(test->max_fd + 1, &read_set, &write_set, NULL, timeout);
+	    result = select(max_fd + 1, &read_set, &write_set, NULL, timeout);
         if (result < 0 && errno != EINTR) {
             cleanup_server(test);
             i_errno = IESELECT;
@@ -694,6 +754,15 @@ iperf_run_server(struct iperf_test *test)
         }
 
 	if (result > 0) {
+            if (test->state == CREATE_STREAMS && test->protocol->id == Pudp) {
+                SLIST_FOREACH(udp_stream_iter, &test->streams, streams) {
+                    if (FD_ISSET(udp_stream_iter->socket, &read_set)) {
+                        iperf_server_handle_udp_connect_msgs(udp_stream_iter);
+                        FD_CLR(udp_stream_iter->socket, &read_set);
+                    }
+                }
+            }
+
             if (FD_ISSET(test->listener, &read_set)) {
                 if (test->state != CREATE_STREAMS) {
                     if (iperf_accept(test) < 0) {

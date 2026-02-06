@@ -82,6 +82,18 @@ iperf_udp_recv(struct iperf_stream *sp)
     if (r <= 0)
         return r;
 
+    /*
+     * Ignore stream-setup control messages (UDP_CONNECT_MSG/REPLY).
+     * These are 4-byte datagrams and can show up in the stream socket if
+     * either side retransmits during setup and a packet is delayed.
+     */
+    if (r == sizeof(unsigned int)) {
+        unsigned int msg;
+        memcpy(&msg, sp->buffer, sizeof(msg));
+        if (msg == UDP_CONNECT_MSG || msg == UDP_CONNECT_REPLY || msg == LEGACY_UDP_CONNECT_REPLY)
+            return 0;
+    }
+
     /* Only count bytes received while we're in the correct state. */
     if (test->state == TEST_RUNNING) {
 
@@ -515,9 +527,14 @@ iperf_udp_connect(struct iperf_test *test)
     unsigned int buf;
 #ifdef SO_RCVTIMEO
     struct timeval tv;
+    struct timeval saved_rcvtimeout;
+    socklen_t saved_rcvtimeout_len = sizeof(saved_rcvtimeout);
+    int have_saved_rcvtimeout = 0;
 #endif
     int rc;
     int i, max_len_wait_for_reply;
+    int attempt;
+    int max_connect_attempts;
 
     /* Create and bind our local socket. */
     if ((s = netdial(test->settings->domain, Pudp, test->bind_address, test->bind_dev, test->bind_port, test->server_hostname, test->server_port, -1)) < 0) {
@@ -587,39 +604,82 @@ iperf_udp_connect(struct iperf_test *test)
      * The server learns our address by obtaining its peer's address.
      */
     buf = UDP_CONNECT_MSG;
-    if (test->debug) {
-        printf("Sending Connect message to Socket %d\n", s);
-    }
-    if (write(s, &buf, sizeof(buf)) < 0) {
-        // XXX: Should this be changed to IESTREAMCONNECT?
-        i_errno = IESTREAMWRITE;
-        return -1;
-    }
-
-    /*
-     * Wait until the server replies back to us with the "accept" response.
-     */
-    i = 0;
     max_len_wait_for_reply = sizeof(buf);
     if (test->reverse) /* In reverse mode allow few packets to have the "accept" response - to handle out of order packets */
         max_len_wait_for_reply += MAX_REVERSE_OUT_OF_ORDER_PACKETS * test->settings->blksize;
-    do {
-        if ((sz = recv(s, &buf, sizeof(buf), 0)) < 0) {
-            i_errno = IESTREAMREAD;
-            return -1;
-        }
-        if (test->debug) {
-            printf("Connect received for Socket %d, sz=%d, buf=%x, i=%d, max_len_wait_for_reply=%d\n", s, sz, buf, i, max_len_wait_for_reply);
-        }
-        i += sz;
-    } while (buf != UDP_CONNECT_REPLY && buf != LEGACY_UDP_CONNECT_REPLY && i < max_len_wait_for_reply);
 
-    if (buf != UDP_CONNECT_REPLY  && buf != LEGACY_UDP_CONNECT_REPLY) {
-        i_errno = IESTREAMREAD;
-        return -1;
+    /*
+     * Send the connect message and wait for the server to reply back to us
+     * with the "accept" response.
+     *
+     * UDP is lossy and the stream-setup exchange is only a single packet in
+     * each direction.  Retransmit the connect message if we do not get a
+     * reply, keeping the overall setup time bounded.
+     */
+    max_connect_attempts = 30;
+#ifdef SO_RCVTIMEO
+    /*
+     * Use a short per-attempt timeout while waiting for the connect reply so
+     * we can retransmit UDP_CONNECT_MSG if the reply is lost.  Restore the
+     * original timeout after the handshake completes.
+     */
+    if (getsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (struct timeval *)&saved_rcvtimeout, &saved_rcvtimeout_len) == 0) {
+        have_saved_rcvtimeout = 1;
+    }
+    tv.tv_sec = 1;
+    tv.tv_usec = 0;
+    (void) setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (struct timeval *)&tv, sizeof(struct timeval));
+#endif
+
+    for (attempt = 0; attempt < max_connect_attempts; ++attempt) {
+        if (test->debug) {
+            printf("Sending Connect message to Socket %d (attempt %d/%d)\n", s, attempt + 1, max_connect_attempts);
+        }
+        if (write(s, &buf, sizeof(buf)) < 0) {
+            /* XXX: Should this be changed to IESTREAMCONNECT? */
+            i_errno = IESTREAMWRITE;
+            goto restore_and_fail;
+        }
+
+        i = 0;
+        while (i < max_len_wait_for_reply) {
+            sz = recv(s, &buf, sizeof(buf), 0);
+            if (sz < 0) {
+                if (errno == EINTR)
+                    continue;
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    /* Per-attempt timeout expired, retransmit connect message. */
+                    break;
+                }
+                i_errno = IESTREAMREAD;
+                goto restore_and_fail;
+            }
+
+            if (test->debug) {
+                printf("Connect received for Socket %d, sz=%d, buf=%x, i=%d, max_len_wait_for_reply=%d\n",
+                    s, sz, buf, i, max_len_wait_for_reply);
+            }
+            i += sz;
+
+            if (buf == UDP_CONNECT_REPLY || buf == LEGACY_UDP_CONNECT_REPLY) {
+#ifdef SO_RCVTIMEO
+                if (have_saved_rcvtimeout)
+                    (void) setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (struct timeval *)&saved_rcvtimeout, sizeof(saved_rcvtimeout));
+#endif
+                return s;
+            }
+        }
     }
 
-    return s;
+    i_errno = IESTREAMREAD;
+    /* Fall through to restore timeout then fail. */
+
+restore_and_fail:
+#ifdef SO_RCVTIMEO
+    if (have_saved_rcvtimeout)
+        (void) setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (struct timeval *)&saved_rcvtimeout, sizeof(saved_rcvtimeout));
+#endif
+    return -1;
 }
 
 
