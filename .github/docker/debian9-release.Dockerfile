@@ -14,7 +14,6 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends \
       build-essential \
       ca-certificates \
-      libssl-dev \
     ; \
     rm -rf /var/lib/apt/lists/*
 
@@ -25,7 +24,8 @@ COPY . /src
 RUN set -eux; \
     # Build with a static libiperf so we can ship a single iperf3 ELF.
     # Note: This does NOT produce a fully-static binary; it only disables libiperf.so.
-    ./configure --disable-shared --enable-static; \
+    # Also disable OpenSSL so release binaries do not depend on libssl/libcrypto.
+    ./configure --disable-shared --enable-static --with-openssl=no; \
     make -j"$(nproc)"; \
     mkdir -p /dist; \
     # With --disable-shared, libtool will typically emit a real ELF at src/iperf3 (no wrapper script).
