@@ -1,0 +1,123 @@
+name: Release Binaries (tags)
+
+permissions:
+  contents: write
+
+"on":
+  push:
+    tags:
+      - "3.20-lxchx-r*"
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-amd64
+            runner: ubuntu-latest
+            platform: linux/amd64
+          - target: linux-arm64
+            runner: ubuntu-latest
+            platform: linux/arm64
+          - target: linux-arm32
+            runner: ubuntu-latest
+            platform: linux/arm/v7
+
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build (Debian 9)
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf out dist
+          mkdir -p out dist
+
+          docker buildx build \
+            --platform "${{ matrix.platform }}" \
+            -f .github/docker/debian9-release.Dockerfile \
+            --output "type=local,dest=out" \
+            .
+
+          gzip -9 -n -c "out/dist/iperf3" > "dist/iperf3-${{ github.ref_name }}-${{ matrix.target }}.gz"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: iperf3-${{ github.ref_name }}-${{ matrix.target }}
+          path: dist/*.gz
+
+  release:
+    name: Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/3.20-lxchx-r')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Required to fetch all history for tags
+          fetch-tags: true
+
+      - name: Build release body from tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG_NAME="${{ github.ref_name }}"
+          TAG_REF="refs/tags/${TAG_NAME}"
+          # actions/checkout may fetch the peeled commit object for annotated tags.
+          # Force-fetch the tag ref to ensure the tag object exists locally.
+          git fetch --force origin "${TAG_REF}:${TAG_REF}"
+
+          TAG_TYPE="$(git cat-file -t "$TAG_REF" | tr -d '\r\n')"
+          if [ "$TAG_TYPE" = "tag" ]; then
+            # Annotated tag: strip headers, keep raw message (markdown headings preserved)
+            BODY="$(git cat-file -p "$TAG_REF" | sed '1,/^$/d' | sed 's/\r$//')"
+          else
+            # Lightweight tag: fall back to commit message
+            BODY="$(git show -s --format=%B "$TAG_NAME")"
+          fi
+          if [ -z "$BODY" ]; then
+            echo "Release ${TAG_NAME}" > RELEASE_BODY.md
+          else
+            printf '%s\n' "$BODY" > RELEASE_BODY.md
+          fi
+
+      - name: Download artifacts from build
+        uses: actions/download-artifact@v4
+        with:
+          pattern: iperf3-${{ github.ref_name }}-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Display structure of downloaded files
+        run: ls -R
+
+      - name: Create Release and Upload Binaries
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          body_path: RELEASE_BODY.md
+          files: |
+            artifacts/**/*.gz
+          draft: false
+          prerelease: false
+          allowUpdates: true
+          make_latest: true
