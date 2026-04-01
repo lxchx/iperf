@@ -1,5 +1,4 @@
 name: Android arm32 test
-name: Android arm32 test
 
 permissions:
   contents: read
