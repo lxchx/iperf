@@ -10,7 +10,7 @@ permissions:
   workflow_dispatch: {}
 
 jobs:
-  build:
+  build_linux:
     name: Build (${{ matrix.target }})
     strategy:
       fail-fast: false
@@ -61,9 +61,51 @@ jobs:
           name: iperf3-${{ github.ref_name }}-${{ matrix.target }}
           path: dist/*.gz
 
+  build_android:
+    name: Build (ndk-${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: arm32
+            artifact_dir: out/android-arm32
+            artifact_gz: iperf3-android-arm32.gz
+          - target: arm64
+            artifact_dir: out/android-arm64
+            artifact_gz: iperf3-android-arm64.gz
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Build Android binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf out dist
+          mkdir -p dist
+
+          ANDROID_TARGET="${{ matrix.target }}" \
+            bash .github/scripts/build-android.sh
+
+          cp "${{ matrix.artifact_dir }}/${{ matrix.artifact_gz }}" \
+            "dist/iperf3-${{ github.ref_name }}-ndk-${{ matrix.target }}.gz"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: iperf3-${{ github.ref_name }}-ndk-${{ matrix.target }}
+          path: dist/*.gz
+
   release:
     name: Release
-    needs: build
+    needs:
+      - build_linux
+      - build_android
     if: startsWith(github.ref, 'refs/tags/3.20-lxchx-r')
     runs-on: ubuntu-latest
     steps:
