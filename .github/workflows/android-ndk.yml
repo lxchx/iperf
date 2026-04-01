@@ -1,0 +1,52 @@
+name: Android NDK
+
+permissions:
+  contents: read
+
+"on":
+  pull_request:
+    branches:
+      - "3.20-lxchx"
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: arm32
+            artifact_dir: out/android-arm32
+            artifact_gz: iperf3-android-arm32.gz
+          - target: arm64
+            artifact_dir: out/android-arm64
+            artifact_gz: iperf3-android-arm64.gz
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build Android binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          ANDROID_TARGET="${{ matrix.target }}" \
+            bash .github/scripts/build-android.sh
+
+      - name: Inspect binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          file "${{ matrix.artifact_dir }}/iperf3"
+          readelf -l "${{ matrix.artifact_dir }}/iperf3" | grep -E 'Requesting program interpreter|INTERP'
+          readelf -d "${{ matrix.artifact_dir }}/iperf3" | grep 'NEEDED' || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: iperf3-android-${{ matrix.target }}
+          path: |
+            ${{ matrix.artifact_dir }}/iperf3
+            ${{ matrix.artifact_dir }}/${{ matrix.artifact_gz }}
