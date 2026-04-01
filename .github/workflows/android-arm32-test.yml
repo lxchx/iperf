@@ -1,0 +1,41 @@
+name: Android arm32 test
+name: Android arm32 test
+
+permissions:
+  contents: read
+
+"on":
+  push:
+    branches:
+      - "android-arm32-ci-test"
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    name: Build android-arm32
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build android-arm32
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash .github/scripts/build-android-arm32.sh
+
+      - name: Inspect binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          file out/android-arm32/iperf3
+          readelf -l out/android-arm32/iperf3 | grep -E 'Requesting program interpreter|INTERP'
+          readelf -d out/android-arm32/iperf3 | grep 'NEEDED' || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: iperf3-${{ github.ref_name }}-android-arm32
+          path: |
+            out/android-arm32/iperf3
+            out/android-arm32/iperf3-android-arm32.gz
