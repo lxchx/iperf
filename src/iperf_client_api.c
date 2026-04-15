@@ -762,6 +762,19 @@ iperf_run_client(struct iperf_test * test)
                         sp->done = 1;
                         if (sp->thread_created == 1) {
                             rc = pthread_cancel(sp->thr);
+#if defined(__ANDROID__)
+                            /* Android emulates pthread_cancel() with
+                             * pthread_kill(). After sp->done = 1, the worker
+                             * can notice the flag and exit on its own before
+                             * this call, and Android may then report the stale
+                             * pthread_t as EINVAL rather than ESRCH. There is
+                             * no reliable portable way to probe pthread_t
+                             * liveness here, so treat Android EINVAL as
+                             * benign. */
+                            if (rc == EINVAL) {
+                                rc = ESRCH;
+                            }
+#endif
                             if (rc != 0 && rc != ESRCH) {
                                 i_errno = IEPTHREADCANCEL;
                                 errno = rc;
@@ -803,6 +816,11 @@ iperf_run_client(struct iperf_test * test)
             sp->done = 1;
             if (sp->thread_created == 1) {
                 rc = pthread_cancel(sp->thr);
+#if defined(__ANDROID__)
+                if (rc == EINVAL) {
+                    rc = ESRCH;
+                }
+#endif
                 if (rc != 0 && rc != ESRCH) {
                     i_errno = IEPTHREADCANCEL;
                     errno = rc;
@@ -850,6 +868,11 @@ iperf_run_client(struct iperf_test * test)
         int rc;
         if (sp->thread_created == 1) {
             rc = pthread_cancel(sp->thr);
+#if defined(__ANDROID__)
+            if (rc == EINVAL) {
+                rc = ESRCH;
+            }
+#endif
             if (rc != 0 && rc != ESRCH) {
                 i_errno = IEPTHREADCANCEL;
                 errno = rc;
