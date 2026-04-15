@@ -12,6 +12,6 @@
  * A short marker shown in version output.  Keep it stable and bump the
  * revision when making incompatible or significant downstream changes.
  */
-#define IPERF3_LOCAL_VARIANT "lxchx r1"
+#define IPERF3_LOCAL_VARIANT "lxchx r3"
 
 #endif /* IPERF3_LOCAL_BUILD_H */
